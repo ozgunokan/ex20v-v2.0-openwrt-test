@@ -4,9 +4,46 @@ TP-Link EX20v v2'ye (EcoNet EN7528, Türk Telekom AX1800) stok firmware'in kendi
 shell'inden, UART gerekmeden tam OpenWrt kurulur. Ana sistem slot B + UBI'de,
 küçük bir kurtarma sistemi slot A'da durur.
 
-> **Uyarı:** Bu kurulum stok firmware'i siler. Kendi sorumluluğunuzdadır.
-> ISS'nizden kiraladığınız bir cihazı değiştirmeden önce sözleşmenize bakın.
+> **Uyarı:** Bu kurulum stok firmware'i siler. Kiralık / ISS'ye ait cihazlarda
+> önce aşağıdaki [Sorumluluk reddi](#sorumluluk-reddi) bölümünü okuyun.
 > Kuruluma başlamadan önce yedek adımlarını (1–2) atlamayın.
+
+## Sorumluluk reddi
+
+**Bu depodaki yamalar, scriptler ve imajlar "OLDUĞU GİBİ" (AS IS), hiçbir garanti
+verilmeden sunulur.** Çalışacakları, belirli bir amaca uygun olacakları ya da
+cihazınıza zarar vermeyecekleri garanti edilmez (GPL-2.0, madde 11–12).
+
+**Kiralık cihazlar.** Türkiye'de EX20v cihazlarının çoğu internet servis
+sağlayıcısı (ISS) tarafından kiralanır veya ücretsiz verilir ve mülkiyeti
+ISS'ye aittir. Böyle bir cihazın yazılımını değiştirmek:
+
+- abonelik sözleşmenizin veya kullanım koşullarının ihlali sayılabilir,
+- cihazın iadesinde arıza / hasar bedeli ya da cezai şart talep edilmesine,
+- ISS'nin uzaktan yönetiminin (TR-069), uzaktan destek ve arıza kaydı
+  hizmetlerinin, telefon (VoIP/FXS) ve DSL bağlantısının kaybına,
+- ISS'nin bu cihaz üzerinden destek vermeyi reddetmesine
+
+yol açabilir. **Cihaz size ait değilse, kurulumdan önce ISS'nizden yazılı izin
+alın ya da kendi satın aldığınız bir cihaz kullanın.** Cihazı iade etmeden önce
+stok yazılıma döndürmek (bkz. [Stoka dönüş](#stoka-dönüş-denenmedi)) tamamen
+sizin sorumluluğunuzdadır; bu işlem denenmemiştir ve başarılı olacağı garanti
+edilmez.
+
+**Riskler.** Kurulum flash belleğe yazar. Elektrik kesintisi, yanlış dosya,
+donanım farkı veya bu yazılımdaki bir hata cihazı kullanılamaz hale getirebilir;
+bu durumda kurtarma için seri konsol (UART) bağlantısı gerekebilir. Bu depoyu
+kullanarak oluşabilecek her türlü donanım arızası, veri kaybı, hizmet kesintisi,
+sözleşme ihlali, maddi veya hukuki sonuçtan **yalnızca kullanıcı sorumludur**;
+depo sahibi ve katkıda bulunanlar sorumlu tutulamaz.
+
+**Bağlantısızlık.** Bu proje bağımsız bir topluluk çalışmasıdır. TP-Link,
+Türk Telekom, EcoNet, MediaTek veya OpenWrt projesi ile herhangi bir bağı
+yoktur ve onlar tarafından onaylanmamıştır. Adı geçen markalar sahiplerine
+aittir ve yalnızca cihazı tanımlamak için kullanılmıştır.
+
+Bu metin hukuki tavsiye değildir. Emin değilseniz sözleşmenizi okuyun veya
+ISS'nize danışın.
 
 ## Çalışanlar / çalışmayanlar
 
