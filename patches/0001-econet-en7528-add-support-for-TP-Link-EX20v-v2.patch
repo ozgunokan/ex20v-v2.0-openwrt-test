@@ -1,0 +1,626 @@
+From 8554b211fe75af7972b4617680965045b750d5d2 Mon Sep 17 00:00:00 2001
+From: Lars Gierth <larsg@systemli.org>
+Date: Mon, 12 Oct 2026 23:34:05 +0200
+Subject: [PATCH 1/2] econet: en7528: add support for TP-Link EX20v v2
+
+TP-Link EX20v v2 is an AX1800 ISP gateway based on the EcoNet EN7528.
+
+* SoC: EcoNet EN7528 (MIPS 1004Kc, 2 cores / 4 threads)
+* RAM: 512MiB (432MiB usable below the MMIO window)
+* Flash: 512MiB SPI NAND, 4KiB page, 256KiB erase block
+* WiFi: MT7915 DBDC on PCIe (the 0x7916 on pcie0 is its HIF2, left off)
+* Ethernet: 1x WAN, 3x LAN on the EN7528 internal switch
+
+The bootloader boots one of two kernel slots selected by an ASCII byte
+at 0x240000 and does not verify the MD5/RSA fields of the TP-Link
+kernel header, so a kernel wrapped in that header boots.
+
+Layout: slot B (0x2980000) holds the main kernel, 0x2f80000-0x1c000000
+is UBI (rootfs + overlay), slot A (0x380000) holds a small rescue
+initramfs (tplink_ex20v-v2-rescue) used for the first install and
+recovery.
+
+LED/button GPIOs follow the EX20v (v1) port at
+github.com/ozgunokan/openwrt-tplink-ex20v and still need verification
+on v2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01YbeF2izcaoFj6qx1YBoB3j
+---
+ .../econet/base-files/etc/board.d/01_leds     |  11 +
+ .../econet/base-files/etc/board.d/02_network  |   3 +
+ .../econet/base-files/lib/upgrade/platform.sh |   7 +-
+ .../econet/dts/en7528_tplink_ex20v-v2.dts     | 411 ++++++++++++++++++
+ target/linux/econet/image/en7528.mk           |  39 ++
+ target/linux/econet/image/tplink-ex20v-hdr.py |  54 +++
+ 6 files changed, 524 insertions(+), 1 deletion(-)
+ create mode 100644 target/linux/econet/dts/en7528_tplink_ex20v-v2.dts
+ create mode 100755 target/linux/econet/image/tplink-ex20v-hdr.py
+
+diff --git a/target/linux/econet/base-files/etc/board.d/01_leds b/target/linux/econet/base-files/etc/board.d/01_leds
+index 7b1a405171..2b32322331 100644
+--- a/target/linux/econet/base-files/etc/board.d/01_leds
++++ b/target/linux/econet/base-files/etc/board.d/01_leds
+@@ -35,6 +35,17 @@ jiofiber,jcow414)
+ 	ucidef_set_led_netdev "lan3-green" "lan3" "mt7530-0:0b:green:lan-3" "lan3" "tx rx"
+ 	ucidef_set_led_netdev "lan4-green" "lan4" "mt7530-0:0c:green:lan-4" "lan4" "tx rx"
+ 	;;
++tplink,ex20v-v2)
++	ucidef_set_led_netdev "wan" "WAN" "mt7530-0:0c:green:wan" "wan" "link tx rx"
++	ucidef_set_led_netdev "lan1" "LAN1" "mt7530-0:0b:green:lan-1" "lan1" "link tx rx"
++	ucidef_set_led_netdev "lan2" "LAN2" "mt7530-0:0a:green:lan-2" "lan2" "link tx rx"
++	ucidef_set_led_netdev "lan3" "LAN3" "mt7530-0:09:green:lan-3" "lan3" "link tx rx"
++	ucidef_set_led_netdev "wan-amber" "WAN amber" "mt7530-0:0c:amber:wan" "wan" "link tx rx"
++	ucidef_set_led_netdev "lan1-amber" "LAN1 amber" "mt7530-0:0b:amber:lan-1" "lan1" "link tx rx"
++	ucidef_set_led_netdev "lan2-amber" "LAN2 amber" "mt7530-0:0a:amber:lan-2" "lan2" "link tx rx"
++	ucidef_set_led_netdev "lan3-amber" "LAN3 amber" "mt7530-0:09:amber:lan-3" "lan3" "link tx rx"
++	ucidef_set_led_usbport "usb" "USB" "green:usb" "usb1-port1" "usb2-port1"
++	;;
+ esac
+ 
+ board_config_flush
+diff --git a/target/linux/econet/base-files/etc/board.d/02_network b/target/linux/econet/base-files/etc/board.d/02_network
+index 8bb6b25b0b..d50acedeb0 100644
+--- a/target/linux/econet/base-files/etc/board.d/02_network
++++ b/target/linux/econet/base-files/etc/board.d/02_network
+@@ -14,6 +14,9 @@ econet_setup_interfaces()
+ 	jiofiber,jcow414)
+ 		ucidef_set_interface_lan "lan1 lan2 lan3 lan4"
+ 		;;
++	tplink,ex20v-v2)
++		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" "wan"
++		;;
+ 	*)
+ 		# The remaining boards have no DSA switch driver yet.
+ 		ucidef_set_interface_lan "eth0"
+diff --git a/target/linux/econet/base-files/lib/upgrade/platform.sh b/target/linux/econet/base-files/lib/upgrade/platform.sh
+index 19c0072e63..f6b13a65b4 100644
+--- a/target/linux/econet/base-files/lib/upgrade/platform.sh
++++ b/target/linux/econet/base-files/lib/upgrade/platform.sh
+@@ -6,7 +6,8 @@ platform_check_image() {
+ 	dasan,h660gm-a-airtel|\
+ 	dasan,h660gm-a-generic|\
+ 	jiofiber,jcow407|\
+-	jiofiber,jcow414)
++	jiofiber,jcow414|\
++	tplink,ex20v-v2)
+ 		return 0
+ 		;;
+ 	esac
+@@ -26,5 +27,9 @@ platform_do_upgrade() {
+ 		CI_KERNPART="tclinux_kernel"
+ 		nand_do_upgrade "$1"
+ 		;;
++	tplink,ex20v-v2)
++		CI_KERNPART="kernel"
++		nand_do_upgrade "$1"
++		;;
+ 	esac
+ }
+diff --git a/target/linux/econet/dts/en7528_tplink_ex20v-v2.dts b/target/linux/econet/dts/en7528_tplink_ex20v-v2.dts
+new file mode 100644
+index 0000000000..e284f4978b
+--- /dev/null
++++ b/target/linux/econet/dts/en7528_tplink_ex20v-v2.dts
+@@ -0,0 +1,411 @@
++// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++/*
++ * TP-Link EX20v v2 (Türk Telekom AX1800 VDSL/fiber gateway)
++ *
++ * SoC:   EcoNet EN7528 (MIPS 1004Kc, 2C/4T)
++ * RAM:   512 MiB (432 MiB visible to the vendor kernel)
++ * Flash: 512 MiB SPI NAND, 4 KiB page, 256 KiB block, EcoNet BMT
++ * WiFi:  MT7915 + MT7916 on PCIe
++ *
++ * The bootloader boots one of two kernel slots, selected by the ASCII
++ * byte at flash 0x240000 ('0' = 0x380000, '1' = 0x2980000; the rest of
++ * that erase block is 0xff, same as vendor libcmm oal_sys_setBootIndex()).
++ * It does not verify the MD5/RSA fields of the TP-Link kernel header.
++ *
++ * OpenWrt layout:
++ *   slot A 0x380000   "rescue"  small initramfs, used to (re)install
++ *   slot B 0x2980000  "kernel"  main kernel, bootflag = '1'
++ *   0x2f80000-0x1c000000 "ubi"  squashfs rootfs + ubifs overlay
++ * 0x1c000000+ is the vendor BMT pool and is left alone. The vendor BMT
++ * is not enabled (raw access); UBI does its own bad block handling.
++ *
++ * The partition table below was taken verbatim from the vendor kernel
++ * (struct mtd_partition array in the 3.18.21 vmlinux).
++ */
++
++/dts-v1/;
++
++#include "en7528.dtsi"
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
++
++
++/ {
++	model = "TP-Link EX20v v2";
++	compatible = "tplink,ex20v-v2", "econet,en7528";
++
++	memory@0 {
++		device_type = "memory";
++		/* Vendor kernel: System RAM 0x00002000-0x1affffff */
++		reg = <0x00000000 0x1b000000>;
++	};
++
++	chosen {
++		bootargs = "console=ttyS0,115200";
++		stdout-path = "serial0:115200n8";
++		linux,usable-memory-range = <0x00020000 0x1afe0000>;
++	};
++
++	aliases {
++		serial0 = &uart;
++		led-boot = &led_power;
++		led-failsafe = &led_power;
++		led-running = &led_power;
++		led-upgrade = &led_power;
++	};
++
++	/*
++	 * LED and button GPIOs as mapped on an EX20v (v1) by the
++	 * ozgunokan/openwrt-tplink-ex20v port; not yet re-verified on v2.
++	 */
++	leds {
++		compatible = "gpio-leds";
++
++		led_power: power {
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_POWER;
++			gpios = <&pinctrl 26 GPIO_ACTIVE_LOW>;
++		};
++
++		internet-green {
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_WAN_ONLINE;
++			gpios = <&pinctrl 27 GPIO_ACTIVE_LOW>;
++		};
++
++		internet-red {
++			color = <LED_COLOR_ID_RED>;
++			function = LED_FUNCTION_WAN;
++			gpios = <&pinctrl 24 GPIO_ACTIVE_LOW>;
++		};
++
++		wps {
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_WPS;
++			gpios = <&pinctrl 25 GPIO_ACTIVE_LOW>;
++		};
++
++		usb {
++			color = <LED_COLOR_ID_GREEN>;
++			function = LED_FUNCTION_USB;
++			gpios = <&pinctrl 23 GPIO_ACTIVE_LOW>;
++		};
++
++		phone {
++			color = <LED_COLOR_ID_GREEN>;
++			function = "phone";
++			gpios = <&pinctrl 5 GPIO_ACTIVE_LOW>;
++		};
++	};
++
++	keys {
++		compatible = "gpio-keys-polled";
++		poll-interval = <20>;
++
++		key-reset {
++			label = "reset";
++			gpios = <&pinctrl 22 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_RESTART>;
++		};
++	};
++};
++
++&usb {
++	status = "okay";
++};
++
++/*
++ * The 14c3:7916 endpoint on pcie0 is the MT7915's HIF2 (second PCIe path of
++ * the same DBDC chip), not a separate radio. mt7915e tries to pair it across
++ * the two root complexes and hangs, so pcie0 stays disabled; the MT7915 on
++ * pcie1 serves both 2.4 GHz and 5 GHz on its own.
++ */
++&pcie0 {
++	status = "disabled";
++};
++
++&pcie1 {
++	status = "okay";
++};
++
++/* MT7915 DBDC, EEPROM from "radio" (starts with the 0x7915 chip id) */
++&slot1 {
++	status = "okay";
++
++	wifi@0,0 {
++		compatible = "mediatek,mt76";
++		reg = <0x0000 0 0 0 0>;
++		nvmem-cells = <&macaddr_romfile_2000 1>, <&eeprom_radio_0>;
++		nvmem-cell-names = "mac-address", "eeprom";
++	};
++};
++
++&gmac0 {
++	status = "okay";
++	nvmem-cells = <&macaddr_romfile_2000 0>;
++	nvmem-cell-names = "mac-address";
++};
++
++&switch {
++	status = "okay";
++};
++
++/*
++ * Front panel port LEDs are driven by the GPHYs (GPIO30-37 in PHY LED mode).
++ * Front panel order WAN LAN1 LAN2 LAN3 = switch ports 4 3 2 1.
++ */
++&pinctrl {
++	gswp1_led0_pins: gswp1-led0-pins {
++		mux {
++			function = "phy1_led0";
++			groups = "gpio30";
++		};
++	};
++
++	gswp1_led1_pins: gswp1-led1-pins {
++		mux {
++			function = "phy1_led1";
++			groups = "gpio31";
++		};
++	};
++
++	gswp2_led0_pins: gswp2-led0-pins {
++		mux {
++			function = "phy2_led0";
++			groups = "gpio32";
++		};
++	};
++
++	gswp2_led1_pins: gswp2-led1-pins {
++		mux {
++			function = "phy2_led1";
++			groups = "gpio33";
++		};
++	};
++
++	gswp3_led0_pins: gswp3-led0-pins {
++		mux {
++			function = "phy3_led0";
++			groups = "gpio34";
++		};
++	};
++
++	gswp3_led1_pins: gswp3-led1-pins {
++		mux {
++			function = "phy3_led1";
++			groups = "gpio35";
++		};
++	};
++
++	gswp4_led0_pins: gswp4-led0-pins {
++		mux {
++			function = "phy4_led0";
++			groups = "gpio36";
++		};
++	};
++
++	gswp4_led1_pins: gswp4-led1-pins {
++		mux {
++			function = "phy4_led1";
++			groups = "gpio37";
++		};
++	};
++};
++
++&gsw_phy1 {
++	pinctrl-names = "gbe-led";
++	pinctrl-0 = <&gswp1_led0_pins>, <&gswp1_led1_pins>;
++};
++
++&gsw_phy1_led0 {
++	color = <LED_COLOR_ID_GREEN>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <3>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy1_led1 {
++	color = <LED_COLOR_ID_AMBER>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <3>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy2 {
++	pinctrl-names = "gbe-led";
++	pinctrl-0 = <&gswp2_led0_pins>, <&gswp2_led1_pins>;
++};
++
++&gsw_phy2_led0 {
++	color = <LED_COLOR_ID_GREEN>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <2>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy2_led1 {
++	color = <LED_COLOR_ID_AMBER>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <2>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy3 {
++	pinctrl-names = "gbe-led";
++	pinctrl-0 = <&gswp3_led0_pins>, <&gswp3_led1_pins>;
++};
++
++&gsw_phy3_led0 {
++	color = <LED_COLOR_ID_GREEN>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <1>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy3_led1 {
++	color = <LED_COLOR_ID_AMBER>;
++	function = LED_FUNCTION_LAN;
++	function-enumerator = <1>;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy4 {
++	pinctrl-names = "gbe-led";
++	pinctrl-0 = <&gswp4_led0_pins>, <&gswp4_led1_pins>;
++};
++
++&gsw_phy4_led0 {
++	color = <LED_COLOR_ID_GREEN>;
++	function = LED_FUNCTION_WAN;
++	active-low;
++	status = "okay";
++};
++
++&gsw_phy4_led1 {
++	color = <LED_COLOR_ID_AMBER>;
++	function = LED_FUNCTION_WAN;
++	active-low;
++	status = "okay";
++};
++
++&gsw_port1 {
++	label = "lan3";
++	status = "okay";
++};
++
++&gsw_port2 {
++	label = "lan2";
++	status = "okay";
++};
++
++&gsw_port3 {
++	label = "lan1";
++	status = "okay";
++};
++
++&gsw_port4 {
++	label = "wan";
++	status = "okay";
++};
++
++&nand {
++	status = "okay";
++	/* econet,bmt intentionally omitted, see header */
++
++	partitions {
++		compatible = "fixed-partitions";
++		#address-cells = <1>;
++		#size-cells = <1>;
++
++		partition@0 {
++			label = "boot";
++			reg = <0x0 0x40000>;
++			read-only;
++		};
++
++		partition@40000 {
++			label = "romfile";
++			reg = <0x40000 0x100000>;
++			read-only;
++
++			nvmem-layout {
++				compatible = "fixed-layout";
++				#address-cells = <1>;
++				#size-cells = <1>;
++
++				/* 40:ae:30:xx:xx:xx, LAN; 5GHz radio uses +1 */
++				macaddr_romfile_2000: macaddr@2000 {
++					compatible = "mac-base";
++					reg = <0x2000 0x6>;
++					#nvmem-cell-cells = <1>;
++				};
++			};
++		};
++
++		partition@140000 {
++			label = "config";
++			reg = <0x140000 0x100000>;
++			read-only;
++		};
++
++		partition@240000 {
++			label = "bootflag";
++			reg = <0x240000 0x40000>;
++		};
++
++		partition@280000 {
++			label = "config_tail";
++			reg = <0x280000 0xc0000>;
++			read-only;
++		};
++
++		partition@340000 {
++			label = "radio";
++			reg = <0x340000 0x40000>;
++			read-only;
++
++			nvmem-layout {
++				compatible = "fixed-layout";
++				#address-cells = <1>;
++				#size-cells = <1>;
++
++				eeprom_radio_0: eeprom@0 {
++					reg = <0x0 0xe00>;
++				};
++			};
++		};
++
++		/* Slot A: rescue initramfs (bootflag '0') */
++		partition@380000 {
++			label = "rescue";
++			reg = <0x380000 0x600000>;
++			read-only;
++		};
++
++		/* vendor slot A rootfs, unused */
++		partition@980000 {
++			label = "unused";
++			reg = <0x980000 0x2000000>;
++			read-only;
++		};
++
++		/* Slot B: main kernel (bootflag '1') */
++		partition@2980000 {
++			label = "kernel";
++			reg = <0x2980000 0x600000>;
++		};
++
++		partition@2f80000 {
++			label = "ubi";
++			reg = <0x2f80000 0x19080000>;
++		};
++	};
++};
+diff --git a/target/linux/econet/image/en7528.mk b/target/linux/econet/image/en7528.mk
+index 7affa04316..74ae40024c 100644
+--- a/target/linux/econet/image/en7528.mk
++++ b/target/linux/econet/image/en7528.mk
+@@ -57,3 +57,42 @@ define Device/jiofiber_jcow407
+   DEVICE_DTS := en7528_jiofiber_jcow407
+ endef
+ TARGET_DEVICES += jiofiber_jcow407
++
++define Build/tplink-ex20v-hdr
++	$(PYTHON) ./tplink-ex20v-hdr.py $@ $@.new 0x80002000
++	mv $@.new $@
++endef
++
++# Main system: kernel in slot B (0x2980000), rootfs in UBI.
++# First install from the rescue system with kernel.bin + ubi.bin,
++# later upgrades with sysupgrade.bin.
++define Device/tplink_ex20v-v2
++  DEVICE_VENDOR := TP-Link
++  DEVICE_MODEL := EX20v
++  DEVICE_VARIANT := v2
++  DEVICE_DTS := en7528_tplink_ex20v-v2
++  BLOCKSIZE := 256k
++  PAGESIZE := 4096
++  KERNEL := kernel-bin | append-dtb | tclinux-free-bootbase-jump | lzma | \
++	tplink-ex20v-hdr | check-size 6291456
++  IMAGES := kernel.bin ubi.bin sysupgrade.bin
++  IMAGE/kernel.bin := append-kernel
++  IMAGE/ubi.bin := append-ubi
++  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
++  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7915-firmware luci
++endef
++TARGET_DEVICES += tplink_ex20v-v2
++
++# Rescue system: small initramfs for slot A (0x380000), boot with bootflag '0'.
++define Device/tplink_ex20v-v2-rescue
++  DEVICE_VENDOR := TP-Link
++  DEVICE_MODEL := EX20v
++  DEVICE_VARIANT := v2 rescue
++  DEVICE_DTS := en7528_tplink_ex20v-v2
++  SUPPORTED_DEVICES := tplink,ex20v-v2
++  KERNEL_INITRAMFS := kernel-bin | append-dtb | tclinux-free-bootbase-jump | \
++	lzma | tplink-ex20v-hdr | check-size 6291456
++  IMAGES :=
++  DEVICE_PACKAGES := -wpad-basic-mbedtls ubi-utils
++endef
++TARGET_DEVICES += tplink_ex20v-v2-rescue
+diff --git a/target/linux/econet/image/tplink-ex20v-hdr.py b/target/linux/econet/image/tplink-ex20v-hdr.py
+new file mode 100755
+index 0000000000..cf22dd40cf
+--- /dev/null
++++ b/target/linux/econet/image/tplink-ex20v-hdr.py
+@@ -0,0 +1,54 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""
++Wrap an LZMA kernel payload in the TP-Link EX20v v2 vendor kernel header.
++
++The 0x200 byte header is copied from the vendor firmware. Only the fields
++the EcoNet bootloader uses are updated:
++  0x68  load address   (0x80002000, tcboot "free bootbase")
++  0x6c  entry point
++  0x74  payload offset (0x200)
++  0x78  payload length
++The MD5 (0x04) and RSA signature (0xd0) fields are left as-is: the
++bootloader was verified not to check them (vendor userspace checks them
++during web upgrades only).
++
++usage: tplink-ex20v-hdr.py <in.lzma> <out.bin> [entry]
++"""
++import struct, sys
++
++TEMPLATE = bytes.fromhex(
++    "03000003021cf72d09b6f509132c594dbf272622cccc2233445566778899aabb"
++    "ccddeeff000000000000000000000000000000000134a14a5900000001000000"
++    "000000000000000000000000000000000000000055aa55aaf1e2d3c4e5a66a5e"
++    "4c3d2e1faa55aa550020008070658a800000280200020000edca420000006000"
++    "00f0f50000000000000000000500aa55000800a5000000009b49983affffffff"
++    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
++    "ffffffffffffffffffffffffffffffff676e74c34b70568ee82fb6e42ec6fa7d"
++    "1be133e37cee71af2e61e2879ab2bb7d37f5d051d82f0aaa41c9840004f67b3c"
++    "17022759b0168b71efb4984970272413ab8f02e94bc62e16a3a159ac0dc20f25"
++    "5c3318f2cd90c0d82704d832f4b32d6a4b7813826b3cd882ab71359368361345"
++    "482b9bf385a4bffa2db059392344835f00000000000000000000000000000000"
++    "0000000000000000000000000000000000000000000000000000000000000000"
++    "0000000000000000000000000000000000000000000000000000000000000000"
++    "0000000000000000000000000000000000000000000000000000000000000000"
++    "00000000000000000000000000000000ffffffffffffffffffffffffffffffff"
++    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
++)
++assert len(TEMPLATE) == 0x200
++
++def main():
++    src, dst = sys.argv[1], sys.argv[2]
++    entry = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x80002000
++    payload = open(src, "rb").read()
++    hdr = bytearray(TEMPLATE)
++    struct.pack_into("<I", hdr, 0x68, 0x80002000)
++    struct.pack_into("<I", hdr, 0x6c, entry)
++    struct.pack_into("<I", hdr, 0x74, 0x200)
++    struct.pack_into("<I", hdr, 0x78, len(payload))
++    with open(dst, "wb") as f:
++        f.write(hdr)
++        f.write(payload)
++
++if __name__ == "__main__":
++    main()
+-- 
+2.43.0
+
