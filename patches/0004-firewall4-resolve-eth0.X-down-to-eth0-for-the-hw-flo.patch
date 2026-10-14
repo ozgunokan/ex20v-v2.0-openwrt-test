@@ -1,0 +1,91 @@
+From ebee4340e81e725b34b294865960f0765ac4a698 Mon Sep 17 00:00:00 2001
+From: genetixteam <genetixteam@gmail.com>
+Date: Wed, 14 Oct 2026 16:24:27 +0300
+Subject: [PATCH] firewall4: resolve eth0.X down to eth0 for the hw flowtable
+
+Take the v1 EX20v port's fw4 patch. netifd reports no devtype for the
+econet eth0.X 8021q devices, so fw4 put eth0.1/eth0.35 in the flowtable
+instead of eth0. nft_dev_forward_path() needs the fully resolved lower
+device in the flowtable; without it every flow stays XMIT_NEIGH, the
+REDIRECT target is the VLAN device and econet-eth refuses the offload
+(repl_rej_odev), so all routed traffic goes through the CPU.
+
+Fall back to DEVTYPE from sysfs uevent when netifd has none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01YbeF2izcaoFj6qx1YBoB3j
+---
+ package/network/config/firewall4/Makefile     |  2 +-
+ .../100-flowtable-resolve-lower-devices.patch | 47 +++++++++++++++++++
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+ create mode 100644 package/network/config/firewall4/patches/100-flowtable-resolve-lower-devices.patch
+
+diff --git a/package/network/config/firewall4/Makefile b/package/network/config/firewall4/Makefile
+index 6ae34ea..330dd80 100644
+--- a/package/network/config/firewall4/Makefile
++++ b/package/network/config/firewall4/Makefile
+@@ -5,7 +5,7 @@
+ include $(TOPDIR)/rules.mk
+ 
+ PKG_NAME:=firewall4
+-PKG_RELEASE:=2
++PKG_RELEASE:=3
+ 
+ PKG_SOURCE_PROTO:=git
+ PKG_SOURCE_URL=$(PROJECT_GIT)/project/firewall4.git
+diff --git a/package/network/config/firewall4/patches/100-flowtable-resolve-lower-devices.patch b/package/network/config/firewall4/patches/100-flowtable-resolve-lower-devices.patch
+new file mode 100644
+index 0000000..ea1e8a4
+--- /dev/null
++++ b/package/network/config/firewall4/patches/100-flowtable-resolve-lower-devices.patch
+@@ -0,0 +1,47 @@
++From: Emre Yavuzalp <emreyavuzalp@gmail.com>
++Subject: fw4: resolve lower devices for vlan/bridge without netifd devtype
++
++On the econet target the eth0.X vlan subdevices are kernel 8021q devices
++netifd does not report a devtype for, so resolve_hw_offload_devices kept
++eth0.1/eth0.35 in the flowtable instead of descending to eth0. The kernel's
++nft_dev_forward_path() requires the fully resolved lower device (eth0) to be
++a flowtable member; without it both flow directions fall back to XMIT_NEIGH,
++the PPPoE direction gets all-zero L2 and VLAN/PPPoE encap actions are never
++generated, so PPE hardware offload cannot bind those flows. Fall back to the
++sysfs uevent DEVTYPE when netifd has no devtype for the device.
++
++--- a/root/usr/share/ucode/fw4.uc
+++++ b/root/usr/share/ucode/fw4.uc
++@@ -423,12 +423,31 @@
++ 	return fields;
++ }
++ 
+++function sysfs_devtype(devname) {
+++	let fd = fs.open(`/sys/class/net/${devname}/uevent`, "r");
+++	let devtype = null;
+++
+++	if (fd) {
+++		let line;
+++		while (length(line = fd.read("line"))) {
+++			let m = match(line, /^DEVTYPE=(.+)\n?$/);
+++			if (m) {
+++				devtype = m[1];
+++				break;
+++			}
+++		}
+++		fd.close();
+++	}
+++
+++	return devtype;
+++}
+++
++ function resolve_lower_devices(devstatus, devname) {
++ 	let dir = fs.opendir(`/sys/class/net/${devname}`);
++ 	let devs = [];
++ 
++ 	if (dir) {
++-		switch (devstatus[devname]?.devtype) {
+++		switch (devstatus[devname]?.devtype ?? sysfs_devtype(devname)) {
++ 		case 'vlan':
++ 		case 'bridge':
++ 			let e;
+-- 
+2.43.0
+

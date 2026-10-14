@@ -1,0 +1,241 @@
+From b32fcd7d62683993073480e5e1c0aa5ebdbb9811 Mon Sep 17 00:00:00 2001
+From: genetixteam <genetixteam@gmail.com>
+Date: Wed, 14 Oct 2026 16:13:39 +0300
+Subject: [PATCH] econet: EX20v v2: bring over the v1 port's runtime tuning
+
+The v1 port ships userspace defaults next to its econet-eth driver that
+the v2 image was missing:
+
+- 90-ex20v-wan-ipv6: disable the dynamic wan_6 on the PPPoE WAN; netifd
+  otherwise respawns it in a loop that eats a whole CPU.
+- packet-steering.sh: keep the ethernet/mt76 NAPI cores free and steer
+  NAT/PPPoE forwarding onto CPU1+CPU3 via RPS.
+- 05-econet-board-json: regenerate an empty /etc/board.json on first boot.
+- 96-ex20v-timezone: Europe/Istanbul, hostname EX20v.
+- ex20v-iptv: apply the IPTV VLAN bridge choice through the driver's
+  debugfs knob.
+
+Board checks accept both tplink,ex20v and tplink,ex20v-v2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01YbeF2izcaoFj6qx1YBoB3j
+---
+ .../econet/base-files/etc/config/ex20v_iptv   |  4 ++
+ .../econet/base-files/etc/init.d/ex20v-iptv   | 47 +++++++++++++++++++
+ .../etc/uci-defaults/05-econet-board-json     | 19 ++++++++
+ .../etc/uci-defaults/90-ex20v-wan-ipv6        | 23 +++++++++
+ .../etc/uci-defaults/96-ex20v-timezone        | 26 ++++++++++
+ .../base-files/etc/uci-defaults/97-ex20v-iptv |  7 +++
+ .../usr/libexec/platform/packet-steering.sh   | 32 +++++++++++++
+ 7 files changed, 158 insertions(+)
+ create mode 100644 target/linux/econet/base-files/etc/config/ex20v_iptv
+ create mode 100755 target/linux/econet/base-files/etc/init.d/ex20v-iptv
+ create mode 100755 target/linux/econet/base-files/etc/uci-defaults/05-econet-board-json
+ create mode 100755 target/linux/econet/base-files/etc/uci-defaults/90-ex20v-wan-ipv6
+ create mode 100755 target/linux/econet/base-files/etc/uci-defaults/96-ex20v-timezone
+ create mode 100755 target/linux/econet/base-files/etc/uci-defaults/97-ex20v-iptv
+ create mode 100755 target/linux/econet/base-files/usr/libexec/platform/packet-steering.sh
+
+diff --git a/target/linux/econet/base-files/etc/config/ex20v_iptv b/target/linux/econet/base-files/etc/config/ex20v_iptv
+new file mode 100644
+index 0000000..585ba4f
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/config/ex20v_iptv
+@@ -0,0 +1,4 @@
++
++config iptv 'main'
++	option lan '0'
++	option vid '0'
+diff --git a/target/linux/econet/base-files/etc/init.d/ex20v-iptv b/target/linux/econet/base-files/etc/init.d/ex20v-iptv
+new file mode 100755
+index 0000000..139ee81
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/init.d/ex20v-iptv
+@@ -0,0 +1,47 @@
++#!/bin/sh /etc/rc.common
++# EX20v: apply the saved carrier-IPTV hardware-bridge choice (Tivibu VLAN
++# 55 / Superonline VLAN 103 on one LAN socket) -- at boot, and on demand
++# from LuCI right after the customer changes it.
++#
++# The econet-eth kernel module always comes up with the bridge disabled
++# (every LAN port plain VID 1); it exposes a debugfs knob
++# (econet_ex20v/iptv) to reprogram the switch live, with no reboot or
++# network restart, but has no notion of UCI or persistence itself. This
++# script is the userspace half: boot() runs it once at every real boot
++# (procd calls boot() instead of start() during the boot sequence); the
++# "Kolay Kurulum" LuCI page calls "start" directly (via fs.exec) right
++# after saving the UCI, for an instant, reboot-free preview.
++
++START=95
++STOP=10
++
++IPTV_SYSFS=/sys/kernel/debug/econet_ex20v/iptv
++
++apply_ex20v_iptv() {
++	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in tplink,ex20v|tplink,ex20v-v2) ;; *) return 0 ;; esac
++	[ -w "$IPTV_SYSFS" ] || return 0
++
++	local lan vid
++	lan="$(uci -q get ex20v_iptv.main.lan)"
++	vid="$(uci -q get ex20v_iptv.main.vid)"
++	lan="${lan:-0}"
++	vid="${vid:-0}"
++
++	if [ "$lan" = 0 ]; then
++		echo 0 > "$IPTV_SYSFS" 2>/dev/null
++	else
++		echo "$lan $vid" > "$IPTV_SYSFS" 2>/dev/null
++	fi
++}
++
++start() {
++	apply_ex20v_iptv
++}
++
++boot() {
++	apply_ex20v_iptv
++}
++
++stop() {
++	:
++}
+diff --git a/target/linux/econet/base-files/etc/uci-defaults/05-econet-board-json b/target/linux/econet/base-files/etc/uci-defaults/05-econet-board-json
+new file mode 100755
+index 0000000..583e5eb
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/uci-defaults/05-econet-board-json
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# econet (C5v / EX20v / VMG): ilk boot'ta /etc/board.json'un dolu olmasini garantile.
++#
++# Taze (-n) flash sonrası ilk boot bazen /etc/board.json'u BOŞ (0 byte) bırakıyor.
++# Yeni ucode wifi generator'ı find_phy_by_path() içinde
++# json(readfile("/etc/board.json")) yapıyor; boş dosya "unexpected end of data"
++# hatası fırlatıyor -> "PHY is undefined for device" -> her iki radyo da
++# retry_setup_failed ile kuruluyor ve Wi-Fi hiç açılmıyor.
++#
++# board_detect yalnızca dosya boş/eksikken yazar (temp+mv), yani geçerli bir
++# board.json asla ezilmez. Bu script wifi ayarından (94-ex20v-wifi-default) ve
++# radyo bring-up'ından ÖNCE (düşük numara) çalışır.
++if [ ! -s /etc/board.json ]; then
++	/bin/board_detect
++	# netifd bu script'ten önce radyoları (başarısız) kurmaya çalıştıysa,
++	# phy artık çözülebildiği için wireless'ı yeniden uygula.
++	/sbin/wifi reload 2>/dev/null
++fi
++exit 0
+diff --git a/target/linux/econet/base-files/etc/uci-defaults/90-ex20v-wan-ipv6 b/target/linux/econet/base-files/etc/uci-defaults/90-ex20v-wan-ipv6
+new file mode 100755
+index 0000000..9e77007
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/uci-defaults/90-ex20v-wan-ipv6
+@@ -0,0 +1,23 @@
++#!/bin/sh
++# TP-Link EX20v: stop netifd from spawning a dynamic IPv6 sub-interface on the
++# PPPoE WAN.
++#
++# config_generate always sets network.wan.ipv6='1' for a pppoe wan, which makes
++# netifd bring up a dynamic "wan_6" interface *in addition to* the static "wan6"
++# dhcpv6 companion it also creates. The two collide: "wan_6" fails its proto
++# setup ("ubus error: Invalid argument") and netifd retries it several times a
++# second, indefinitely -- on this weak 2-core (4-VPE) SoC that fork loop burns
++# roughly half the CPU and measurably drops Wi-Fi<->WAN throughput. The static
++# "wan6" already provides IPv6 (global address + /60 prefix delegation), so just
++# disable the dynamic one. See OpenWrt issues #21422 and #20815.
++#
++# Runs once at first boot / factory reset, after config_generate has written the
++# default network config; the committed value then persists across reboots.
++
++case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in tplink,ex20v|tplink,ex20v-v2) ;; *) exit 0 ;; esac
++[ "$(uci -q get network.wan.proto)" = "pppoe" ] || exit 0
++
++uci -q set network.wan.ipv6='0'
++uci -q commit network
++
++exit 0
+diff --git a/target/linux/econet/base-files/etc/uci-defaults/96-ex20v-timezone b/target/linux/econet/base-files/etc/uci-defaults/96-ex20v-timezone
+new file mode 100755
+index 0000000..4f0a767
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/uci-defaults/96-ex20v-timezone
+@@ -0,0 +1,26 @@
++#!/bin/sh
++# TP-Link EX20v: system defaults — timezone (Turkey / UTC+3) + hostname.
++#
++# Timezone: OpenWrt ships 'UTC'. Turkey has a permanent UTC+3 offset with no DST
++# since 2016, so the POSIX TZ string is simply "<+03>-3" (sign inverted in POSIX:
++# east-of-UTC becomes negative). zonename is the human-readable Olson name.
++#
++# Hostname: default 'OpenWrt' -> 'EX20v' so the device identifies itself by model
++# in LuCI, SSH prompt and on the network.
++#
++# Runs once at first boot / factory reset; committed values persist across
++# reboots and can still be changed by the user from LuCI afterwards.
++
++case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in tplink,ex20v|tplink,ex20v-v2) ;; *) exit 0 ;; esac
++
++uci -q batch <<-EOF
++	set system.@system[0].zonename='Europe/Istanbul'
++	set system.@system[0].timezone='<+03>-3'
++	set system.@system[0].hostname='EX20v'
++	commit system
++EOF
++
++# apply the new hostname immediately (also picked up on next boot from config)
++echo 'EX20v' > /proc/sys/kernel/hostname 2>/dev/null
++
++exit 0
+diff --git a/target/linux/econet/base-files/etc/uci-defaults/97-ex20v-iptv b/target/linux/econet/base-files/etc/uci-defaults/97-ex20v-iptv
+new file mode 100755
+index 0000000..69b40f0
+--- /dev/null
++++ b/target/linux/econet/base-files/etc/uci-defaults/97-ex20v-iptv
+@@ -0,0 +1,7 @@
++#!/bin/sh
++case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in tplink,ex20v|tplink,ex20v-v2) ;; *) exit 0 ;; esac
++
++/etc/init.d/ex20v-iptv enable
++/etc/init.d/ex20v-iptv start
++
++exit 0
+diff --git a/target/linux/econet/base-files/usr/libexec/platform/packet-steering.sh b/target/linux/econet/base-files/usr/libexec/platform/packet-steering.sh
+new file mode 100755
+index 0000000..4101e18
+--- /dev/null
++++ b/target/linux/econet/base-files/usr/libexec/platform/packet-steering.sh
+@@ -0,0 +1,32 @@
++#!/bin/sh
++# econet platform packet-steering hook.
++#
++# The generic /usr/libexec/network/packet-steering.uc spreads RPS across all
++# CPUs. On the TP-Link EX20v that is suboptimal: the ethernet RX-NAPI is fixed
++# to CPU0 and the mt76 Wi-Fi RX-NAPI to CPU2 (their hard IRQs cannot be
++# reaffined off the MIPS GIC), so each receive core should stay dedicated to
++# its NAPI while the NAT/PPPoE forwarding is pushed onto the two otherwise-idle
++# cores. Steer the forward path onto CPU1+CPU3 (mask 0xa) with RPS. Only the
++# software-forwarded Wi-Fi<->WAN path is affected; PPE-offloaded wired traffic
++# never reaches the CPU. Re-runs on every network reload via the packet_steering
++# service triggers, so late-appearing devices (wifi, pppoe) are covered too.
++#
++# $1 = network.@globals[0].packet_steering uci value (unused for EX20v; the
++# tuned scheme is always applied). Every other econet board falls through to
++# the generic implementation unchanged.
++
++board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
++
++if [ "$board" != "tplink,ex20v" ] && [ "$board" != "tplink,ex20v-v2" ]; then
++	steering_flows="$(uci -q get network.@globals[0].steering_flows)"
++	[ "${steering_flows:-0}" -gt 0 ] && set -- -l "$steering_flows" "$@"
++	exec /usr/libexec/network/packet-steering.uc "$@"
++fi
++
++for dev in eth0 phy0-ap0 phy1-ap0; do
++	for q in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
++		[ -e "$q" ] && echo a > "$q" 2>/dev/null
++	done
++done
++
++exit 0
+-- 
+2.43.0
+
