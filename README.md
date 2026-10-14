@@ -49,8 +49,9 @@ ISS'nize danışın.
 
 | Özellik | Durum |
 | --- | --- |
-| Ethernet (WAN + 3 LAN), PPE donanım offload | çalışıyor |
+| Ethernet (WAN + 3 LAN), PPE donanım offload | çalışıyor, kabloda gigabit, CPU ~%0 |
 | Wi-Fi 2,4 + 5 GHz (MT7915 DBDC) | çalışıyor |
+| İnternet → Wi-Fi PPE offload (stok "ExtIf" yöntemi) | çalışıyor, 5 GHz'de ~780 Mbit/s |
 | Port, Wi-Fi, güç, internet, USB LED'leri; reset butonu | çalışıyor |
 | USB, 2 çekirdek / 4 thread | çalışıyor |
 | Kalıcı ayarlar (UBI, ~350 MB), LuCI'den sysupgrade | çalışıyor |
@@ -58,6 +59,42 @@ ISS'nize danışın.
 
 WAN varsayılanı `eth0.35` + PPPoE (Türk Telekom altyapısı). VLAN'sız bir ISS'de
 `eth0.2` + DHCP kullanın. LAN = `eth0.1`, `192.168.1.1`.
+
+## Performans
+
+Türk Telekom PPPoE (VLAN 35) hattında ölçüldü:
+
+| | Hızlandırma yokken | Bu imajla |
+| --- | --- | --- |
+| Kablolu indirme | ~150 Mbit/s, tek çekirdek %100 | gigabit, CPU ~%0 |
+| Wi-Fi indirme (5 GHz, 2x2 telefon) | 130–330 Mbit/s | ~780 Mbit/s |
+| Wi-Fi yükleme | hattın sınırı | hattın sınırı |
+
+Nasıl çalışıyor:
+
+- **Kablolu:** Bağlantılar SoC'nin PPE motoruna bağlanır. NAT, VLAN ve PPPoE
+  tamamen donanımda yapılır.
+- **İnternet → Wi-Fi:** EN7528'de WED yok, PPE paketi doğrudan Wi-Fi kartına
+  gönderemez. Bu yüzden stok yazılımın `hw_nat` "ExtIf" yöntemi kullanılır.
+  PPE NAT'ı ve başlık düzenlemesini yapar, paketi CPU'ya hazır olarak verir;
+  sürücü de onu ağ yığınını atlayarak doğrudan Wi-Fi'ye iletir. Varsayılan
+  olarak açıktır. Kapatmak için:
+  `echo 0 > /sys/module/econet_eth/parameters/wifi_offload`
+- **Wi-Fi → internet:** Yazılım flowtable ile yapılır. Stokun `SendToPpe` yolu
+  henüz yok. 57 Mbit/s yüklemeli hatta gerek olmadı; simetrik hatlarda
+  ileride eklenebilir.
+- Wi-Fi ve NAT yükü, packet steering (RPS) ile CPU1+CPU3'e dağıtılır.
+
+Kontrol:
+
+```sh
+nft list flowtables | grep -E "devices|flags"      # eth0 ve br-lan görünmeli, flags offload
+grep -E "repl_ok|rx_cpu" /sys/kernel/debug/econet_ppe/diag
+```
+
+`repl_ok_v4` kablolu, `rx_cpu_xmit` Wi-Fi'ye giden donanım bağlantılarıdır;
+`rx_cpu_nomatch` 0 kalmalıdır. Darboğaz araması için `scripts/wifitest.sh`
+ve `scripts/diag_perf.sh` var. `diag_perf.sh` PPPoE şifresini gizler.
 
 ## Flash yerleşimi
 
@@ -140,9 +177,17 @@ Herhangi bir adımda `HATA` çıkarsa script durur ve bayrağa dokunmaz.
 - LuCI'deki uyarıdan root şifresi koyun.
 - Network → Interfaces → `wan`: PPPoE kullanıcı adı / şifre.
 - Network → Wireless: iki radyoyu açın, şifre koyun.
-- Network → Firewall → *Hardware flow offloading*. Kontrol: `nft list flowtables`
-  çıktısında `flags offload`.
+- Network → Firewall → *Software flow offloading* ve *Hardware flow offloading*
+  açın. Kontrol: `nft list flowtables` çıktısında `eth0`, `br-lan` ve
+  `flags offload`.
 - Güncelleme: System → Backup / Flash Firmware → `ex20v-v2-sysupgrade.bin`.
+  "Ayarları koru" işaretli kalsın. SSH'tan `sysupgrade -n` ayarları siler.
+- Saat dilimi (İstanbul) ve cihaz adı (`EX20v`) ilk açılışta ayarlanır.
+  PPPoE WAN'da netifd'nin sürekli tekrar denediği `wan_6` arayüzü kapatılır.
+
+**Bilinen durum:** Kurulumdan sonraki ilk açılışta PPPoE bağlanırken LAN IP'si
+de değiştirilirse dnsmasq "crash loop" durumuna düşebilir. Belirti: LAN'da IP
+gelmez, statik IP ile arayüze girilir. Çözüm: bir kez `reboot`.
 
 ## Kurtarma
 
@@ -209,6 +254,19 @@ GPIO'ları v1 ile aynı; NAND çipi farklı (v1 ESMT, v2 Micron, aynı geometri)
 Stoktan sıfırdan kurulum v1'de büyük ihtimalle çalışır ama denenmedi.
 v1 portu kurulu bir cihaza bu imajı sysupgrade ile yüklemeyin.
 
+## Yamalar
+
+| Yama | Ne yapar |
+| --- | --- |
+| `0001` | EX20v v2 cihaz desteği: DTS, imaj, kurtarma, LED, ağ |
+| `0002` | v1 portunun PPE offload'lu `econet-eth` sürücüsü + port LED'leri |
+| `0003` | v1'in çalışma ayarları: RPS, `wan_6` döngüsü, saat dilimi, IPTV |
+| `0004` | firewall4: flowtable'da `eth0.X` yerine `eth0` (v1'den; kablolu PPE için şart) |
+| `0005` | mt76: 5 GHz bandına ayrı MAC (v1'den) |
+| `0006` | firewall4: hw offload'da `br-lan` de flowtable'da (Wi-Fi hızlı yolu) |
+| `0007` | econet-eth: internet → Wi-Fi PPE offload (CPU çıkışlı, "ExtIf") |
+| `0008` | `0007`'yi varsayılan açık yapar |
+
 ## Teşekkür ve lisans
 
 - [OpenWrt](https://github.com/openwrt/openwrt) — EcoNet EN7528 hedefi.
@@ -216,6 +274,9 @@ v1 portu kurulu bir cihaza bu imajı sysupgrade ile yüklemeyin.
 - Emre Yavuzalp — EX20v (v1) OpenWrt portu (fork:
   [ozgunokan/openwrt-tplink-ex20v](https://github.com/ozgunokan/openwrt-tplink-ex20v)):
   PPE donanım offload'lu `econet-eth` yamaları, LED/buton GPIO'ları, port
-  eşlemesi. `patches/0002-*` bu yamaları yazarlarının adlarıyla içerir.
+  eşlemesi, firewall4 flowtable düzeltmesi, mt76 MAC yaması ve çalışma
+  ayarları. `0002`–`0005` bu çalışmaları yazarlarının adlarıyla içerir.
+- Wi-Fi offload yöntemi, stok TP-Link/EcoNet `hw_nat.ko`'daki "ExtIf" yolundan
+  (yalnızca davranışından) esinlenmiştir; vendor kodu kopyalanmamıştır.
 
 Yamalar ve OpenWrt değişiklikleri GPL-2.0 lisanslıdır (OpenWrt ve Linux ile aynı).
