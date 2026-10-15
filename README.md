@@ -276,6 +276,7 @@ v1 portu kurulu bir cihaza bu imajı sysupgrade ile yüklemeyin.
   PPE donanım offload'lu `econet-eth` yamaları, LED/buton GPIO'ları, port
   eşlemesi, firewall4 flowtable düzeltmesi, mt76 MAC yaması ve çalışma
   ayarları. `0002`–`0005` bu çalışmaları yazarlarının adlarıyla içerir.
+  - Root erişimi için Laserbird'e teşekkürler.
 - Wi-Fi offload yöntemi, stok TP-Link/EcoNet `hw_nat.ko`'daki "ExtIf" yolundan
   (yalnızca davranışından) esinlenmiştir; vendor kodu kopyalanmamıştır.
 
